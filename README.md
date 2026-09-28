@@ -20,6 +20,8 @@ A Gradle plugin to generate build meta files for Kotlin (JVM / Multiplatform) an
 
 Requires Gradle 9.7 or newer, plus the Java, Kotlin JVM, or Kotlin Multiplatform plugin.
 
+![Gradle Plugin Portal Version](https://img.shields.io/gradle-plugin-portal/v/dev.gradienttim.buildmeta?style=flat-square)
+
 ```kotlin
 plugins {
     id("dev.gradienttim.buildmeta") version "VERSION"
