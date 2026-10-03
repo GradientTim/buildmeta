@@ -28,7 +28,7 @@ import javax.inject.Inject
  */
 public abstract class BuildMeta @Inject constructor(
     public val name: String,
-    private val providers: ProviderFactory,
+    internal val providers: ProviderFactory,
 ) {
     /**
      * A list of field specifications that define the properties, their values, and associated options

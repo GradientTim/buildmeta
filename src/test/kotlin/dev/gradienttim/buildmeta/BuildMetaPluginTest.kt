@@ -17,15 +17,20 @@ class BuildMetaPluginTest {
     private val generatedDir: File
         get() = projectDir.resolve("build/generated/buildmeta/java")
 
+    private val cleanEnvironment: Map<String, String> =
+        System.getenv().filterKeys { it !in CI_VARIABLES && it != "SOURCE_DATE_EPOCH" }
+
     @AfterTest
     fun cleanup() {
         projectDir.deleteRecursively()
     }
 
-    private fun project(buildMeta: String, extra: String = "") {
+    private fun project(buildMeta: String, extra: String = "", imports: String = "") {
         projectDir.resolve("settings.gradle.kts").writeText("rootProject.name = \"test\"")
         projectDir.resolve("build.gradle.kts").writeText(
             """
+            $imports
+
             plugins {
                 java
                 id("dev.gradienttim.buildmeta")
@@ -41,13 +46,15 @@ class BuildMetaPluginTest {
         )
     }
 
-    private fun runner(vararg arguments: String): GradleRunner =
+    private fun runner(vararg arguments: String, environment: Map<String, String> = emptyMap()): GradleRunner =
         GradleRunner.create()
             .withProjectDir(projectDir)
             .withPluginClasspath()
+            .withEnvironment(cleanEnvironment + environment)
             .withArguments(*arguments, "--configuration-cache", "--stacktrace")
 
-    private fun build(vararg arguments: String): BuildResult = runner(*arguments).build()
+    private fun build(vararg arguments: String, environment: Map<String, String> = emptyMap()): BuildResult =
+        runner(*arguments, environment = environment).build()
 
     private fun fail(vararg arguments: String): BuildResult = runner(*arguments).buildAndFail()
 
@@ -164,5 +171,293 @@ class BuildMetaPluginTest {
             resources.resolve("app.properties").readText(),
         )
         assertTrue(resources.resolve("logo.png").readText().contains("{{buildMeta:appName}}"))
+    }
+
+    private fun git(vararg args: String): String {
+        val process = ProcessBuilder("git", *args).directory(projectDir).redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader().readText().trim()
+        check(process.waitFor() == 0) { "git ${args.joinToString(" ")} failed: $output" }
+        return output
+    }
+
+    private fun initGitRepo() {
+        git("init", "-q", "-b", "feature")
+        git("config", "user.name", "Test Author")
+        git("config", "user.email", "test@example.com")
+        git("config", "commit.gpgsign", "false")
+        git("remote", "add", "origin", "https://user:secret@example.com/repo.git")
+        projectDir.resolve(".gitignore").writeText("build/\n.gradle/\n")
+        git("add", ".")
+        git("commit", "-q", "-m", "Initial commit")
+    }
+
+    @Test
+    fun `registers git fields`() {
+        project("registerGitMeta()", imports = "import dev.gradienttim.buildmeta.helpers.registerGitMeta")
+        initGitRepo()
+
+        build("generateGitMetaBuildMeta")
+
+        val source = generatedDir.resolve("gitMeta/com/test/GitMeta.java").readText()
+        assertContains(source, "COMMIT_HASH = \"${git("rev-parse", "HEAD")}\";")
+        assertContains(source, "COMMIT_HASH_SHORT = \"${git("rev-parse", "--short", "HEAD")}\";")
+        assertContains(source, "BRANCH = \"feature\";")
+        assertContains(source, "IS_DIRTY = false;")
+        assertContains(source, "COMMIT_TIMESTAMP = ${git("show", "-s", "--format=%ct", "HEAD")}L;")
+        assertContains(source, "COMMIT_MESSAGE = \"Initial commit\";")
+        assertContains(source, "COMMIT_AUTHOR = \"Test Author\";")
+        assertContains(source, "COMMIT_COUNT = 1;")
+        assertContains(source, "REMOTE_URL = \"https://example.com/repo.git\";")
+
+        projectDir.resolve("dirty.txt").writeText("dirty")
+        val second = build("generateGitMetaBuildMeta")
+
+        assertContains(second.output, "Configuration cache entry reused")
+        assertContains(generatedDir.resolve("gitMeta/com/test/GitMeta.java").readText(), "IS_DIRTY = true;")
+    }
+
+    @Test
+    fun `skips disabled git topics`() {
+        project(
+            "registerGitMeta(includeCommitDetails = false, includeRepoStats = false)",
+            imports = "import dev.gradienttim.buildmeta.helpers.registerGitMeta",
+        )
+        initGitRepo()
+
+        build("generateGitMetaBuildMeta")
+
+        val source = generatedDir.resolve("gitMeta/com/test/GitMeta.java").readText()
+        assertContains(source, "COMMIT_HASH = ")
+        assertFalse(source.contains("COMMIT_AUTHOR"))
+        assertFalse(source.contains("COMMIT_COUNT"))
+    }
+
+    @Test
+    fun `falls back outside a git repository`() {
+        project("registerGitMeta()", imports = "import dev.gradienttim.buildmeta.helpers.registerGitMeta")
+
+        build("generateGitMetaBuildMeta")
+
+        val source = generatedDir.resolve("gitMeta/com/test/GitMeta.java").readText()
+        assertContains(source, "COMMIT_HASH = \"unknown\";")
+        assertContains(source, "IS_DIRTY = false;")
+        assertContains(source, "COMMIT_TIMESTAMP = 0L;")
+        assertContains(source, "COMMIT_COUNT = 0;")
+        assertContains(source, "REMOTE_URL = \"\";")
+    }
+
+    @Test
+    fun `registers project fields`() {
+        project(
+            """
+            registerProjectMeta()
+            project.group = "com.example"
+            project.version = "2.0.0"
+            """,
+            imports = "import dev.gradienttim.buildmeta.helpers.registerProjectMeta",
+        )
+
+        build("generateProjectMetaBuildMeta")
+
+        val source = generatedDir.resolve("projectMeta/com/test/ProjectMeta.java").readText()
+        assertContains(source, "NAME = \"test\";")
+        assertContains(source, "PATH = \":\";")
+        assertContains(source, "GROUP = \"com.example\";")
+        assertContains(source, "VERSION = \"2.0.0\";")
+        assertContains(source, "DESCRIPTION = \"\";")
+    }
+
+    private fun multiModuleProject(root: String, app: String) {
+        projectDir.resolve("settings.gradle.kts").writeText("rootProject.name = \"test\"\ninclude(\":app\")")
+        projectDir.resolve("build.gradle.kts").writeText(root)
+        projectDir.resolve("app").mkdirs()
+        projectDir.resolve("app/build.gradle.kts").writeText(
+            """
+            import dev.gradienttim.buildmeta.helpers.registerProjectMeta
+
+            plugins {
+                java
+                id("dev.gradienttim.buildmeta")
+            }
+
+            $app
+            """.trimIndent(),
+        )
+    }
+
+    private val appProjectMeta: String
+        get() = projectDir.resolve("app/build/generated/buildmeta/java/projectMeta/com/test/ProjectMeta.java").readText()
+
+    @Test
+    fun `falls back to root project values`() {
+        multiModuleProject(
+            """
+            group = "com.example"
+            version = "1.2.3"
+            description = "Root"
+            """.trimIndent(),
+            """
+            version = "9.9.9"
+
+            buildMeta {
+                fallbackPackageName = "com.test"
+                registerProjectMeta(useRootProjectFallback = true, includeRootProject = true)
+            }
+            """,
+        )
+
+        build(":app:generateProjectMetaBuildMeta")
+
+        assertContains(appProjectMeta, "NAME = \"app\";")
+        assertContains(appProjectMeta, "PATH = \":app\";")
+        assertContains(appProjectMeta, "GROUP = \"com.example\";")
+        assertContains(appProjectMeta, "VERSION = \"9.9.9\";")
+        assertContains(appProjectMeta, "DESCRIPTION = \"Root\";")
+        assertContains(appProjectMeta, "ROOT_NAME = \"test\";")
+        assertContains(appProjectMeta, "ROOT_GROUP = \"com.example\";")
+        assertContains(appProjectMeta, "ROOT_VERSION = \"1.2.3\";")
+        assertContains(appProjectMeta, "ROOT_DESCRIPTION = \"Root\";")
+    }
+
+    @Test
+    fun `ignores root project values by default`() {
+        multiModuleProject(
+            """
+            group = "com.example"
+            version = "1.2.3"
+            """.trimIndent(),
+            """
+            buildMeta {
+                fallbackPackageName = "com.test"
+                registerProjectMeta()
+            }
+            """,
+        )
+
+        val result = build(":app:generateProjectMetaBuildMeta", "-Dorg.gradle.unsafe.isolated-projects=true")
+
+        assertContains(result.output, "Isolated Projects is an incubating feature")
+
+        assertContains(appProjectMeta, "GROUP = \"test\";")
+        assertContains(appProjectMeta, "VERSION = \"unspecified\";")
+        assertContains(appProjectMeta, "DESCRIPTION = \"\";")
+        assertFalse(appProjectMeta.contains("ROOT_"))
+    }
+
+    private fun generated(buildMeta: String, fileName: String): String =
+        generatedDir.resolve("$buildMeta/com/test/$fileName.java").readText()
+
+    @Test
+    fun `registers ci fields`() {
+        project("registerCiMeta()", imports = "import dev.gradienttim.buildmeta.helpers.registerCiMeta")
+
+        build("generateCiMetaBuildMeta", environment = GITHUB_ACTIONS_ENVIRONMENT)
+
+        val source = generated("ciMeta", "CiMeta")
+        assertContains(source, "IS_CI = true;")
+        assertContains(source, "CI_PROVIDER = \"github-actions\";")
+        assertContains(source, "BUILD_NUMBER = \"42\";")
+        assertContains(source, "BUILD_URL = \"https://github.com/owner/repo/actions/runs/7\";")
+        assertContains(source, "BRANCH = \"main\";")
+    }
+
+    @Test
+    fun `detects unknown and missing ci`() {
+        project("registerCiMeta()", imports = "import dev.gradienttim.buildmeta.helpers.registerCiMeta")
+
+        build("generateCiMetaBuildMeta")
+        val local = generated("ciMeta", "CiMeta")
+        assertContains(local, "IS_CI = false;")
+        assertContains(local, "CI_PROVIDER = \"none\";")
+        assertContains(local, "BUILD_NUMBER = \"\";")
+
+        build("generateCiMetaBuildMeta", environment = mapOf("CI" to "true"))
+        val unknown = generated("ciMeta", "CiMeta")
+        assertContains(unknown, "IS_CI = true;")
+        assertContains(unknown, "CI_PROVIDER = \"unknown\";")
+    }
+
+    @Test
+    fun `uses ci branch for detached git checkouts`() {
+        project("registerGitMeta()", imports = "import dev.gradienttim.buildmeta.helpers.registerGitMeta")
+        initGitRepo()
+        git("checkout", "-q", "--detach")
+
+        build("generateGitMetaBuildMeta")
+        assertContains(generated("gitMeta", "GitMeta"), "BRANCH = \"HEAD\";")
+
+        build("generateGitMetaBuildMeta", environment = GITHUB_ACTIONS_ENVIRONMENT)
+        assertContains(generated("gitMeta", "GitMeta"), "BRANCH = \"main\";")
+    }
+
+    @Test
+    fun `registers environment fields`() {
+        project(
+            "registerEnvironmentMeta()",
+            imports = "import dev.gradienttim.buildmeta.helpers.registerEnvironmentMeta",
+        )
+
+        build("generateEnvironmentMetaBuildMeta")
+
+        val source = generated("environmentMeta", "EnvironmentMeta")
+        assertContains(source, "GRADLE_VERSION = \"")
+        assertContains(source, "JAVA_VERSION = \"${System.getProperty("java.specification.version")}\";")
+        assertContains(source, "KOTLIN_VERSION = \"\";")
+        assertContains(source, "OS_NAME = \"${System.getProperty("os.name")}\";")
+        assertContains(source, "OS_ARCH = \"${System.getProperty("os.arch")}\";")
+        assertFalse(source.contains("BUILD_USER"))
+        assertFalse(source.contains("HOST_NAME"))
+        assertFalse(source.contains("BUILD_TIMESTAMP"))
+    }
+
+    @Test
+    fun `registers optional environment fields`() {
+        project(
+            "registerEnvironmentMeta(includeUser = true, includeHostName = true, includeTimestamp = true)",
+            imports = "import dev.gradienttim.buildmeta.helpers.registerEnvironmentMeta",
+        )
+
+        build("generateEnvironmentMetaBuildMeta", environment = mapOf("SOURCE_DATE_EPOCH" to "1700000000"))
+
+        val source = generated("environmentMeta", "EnvironmentMeta")
+        assertContains(source, "BUILD_USER = \"${System.getProperty("user.name")}\";")
+        assertContains(source, "HOST_NAME = \"")
+        assertContains(source, "BUILD_TIMESTAMP = 1700000000L;")
+    }
+
+    @Test
+    fun `reads build timestamp at execution time`() {
+        project(
+            "registerEnvironmentMeta(includeTimestamp = true)",
+            imports = "import dev.gradienttim.buildmeta.helpers.registerEnvironmentMeta",
+        )
+        val timestamp = Regex("BUILD_TIMESTAMP = (\\d+)L;")
+
+        build("generateEnvironmentMetaBuildMeta")
+        val first = timestamp.find(generated("environmentMeta", "EnvironmentMeta"))!!.groupValues[1].toLong()
+        Thread.sleep(1100)
+        val second = build("generateEnvironmentMetaBuildMeta")
+
+        assertContains(second.output, "Configuration cache entry reused")
+        val updated = timestamp.find(generated("environmentMeta", "EnvironmentMeta"))!!.groupValues[1].toLong()
+        assertTrue(updated > first)
+    }
+
+    private companion object {
+        val CI_VARIABLES = setOf(
+            "CI", "GITHUB_ACTIONS", "GITLAB_CI", "JENKINS_URL", "CIRCLECI", "TF_BUILD",
+            "BITBUCKET_BUILD_NUMBER", "BUILDKITE", "TRAVIS", "TEAMCITY_VERSION",
+            "GITHUB_HEAD_REF", "GITHUB_REF_NAME", "GITHUB_RUN_NUMBER", "GITHUB_RUN_ID",
+        )
+
+        val GITHUB_ACTIONS_ENVIRONMENT = mapOf(
+            "GITHUB_ACTIONS" to "true",
+            "GITHUB_RUN_NUMBER" to "42",
+            "GITHUB_SERVER_URL" to "https://github.com",
+            "GITHUB_REPOSITORY" to "owner/repo",
+            "GITHUB_RUN_ID" to "7",
+            "GITHUB_HEAD_REF" to "",
+            "GITHUB_REF_NAME" to "main",
+        )
     }
 }

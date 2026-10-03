@@ -15,6 +15,7 @@ import org.gradle.api.*
 import org.gradle.api.file.Directory
 import org.gradle.api.file.RegularFile
 import org.gradle.api.file.SourceDirectorySet
+import org.gradle.api.plugins.JavaBasePlugin
 import org.gradle.api.plugins.JavaPluginExtension
 import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.PathSensitivity
@@ -26,6 +27,20 @@ import org.gradle.language.jvm.tasks.ProcessResources
 public class BuildMetaPlugin : Plugin<Project> {
     override fun apply(target: Project) {
         val extension = target.extensions.create("buildMeta", BuildMetaExtension::class.java)
+        extension.projectName.set(target.name)
+        extension.projectPath.set(target.path)
+        val defaultGroup = defaultGroup(target)
+        extension.projectGroup.set(target.provider { target.group.toString().takeUnless { it == defaultGroup } })
+        extension.projectVersion.set(target.provider { target.version.toString().takeUnless { it == Project.DEFAULT_VERSION } })
+        extension.projectDescription.set(target.provider { target.description })
+        extension.projectDefaultGroup.set(defaultGroup)
+        extension.rootProjectName.set(target.rootProject.name)
+        extension.rootProjectGroup.set(target.provider { target.rootProject.group.toString().ifEmpty { null } })
+        extension.rootProjectVersion.set(
+            target.provider { target.rootProject.version.toString().takeUnless { it == Project.DEFAULT_VERSION } },
+        )
+        extension.rootProjectDescription.set(target.provider { target.rootProject.description })
+        extension.javaVersion.convention(JavaVersion.current().majorVersion)
         val language = target.objects.property(Language::class.java)
         val resolvedLanguage = language.orElse(
             target.provider<Language> {
@@ -87,13 +102,20 @@ public class BuildMetaPlugin : Plugin<Project> {
             }
         }
 
+        target.plugins.withType(JavaBasePlugin::class.java) {
+            val java = target.extensions.getByType(JavaPluginExtension::class.java)
+            extension.javaVersion.set(target.provider { java.targetCompatibility.majorVersion })
+        }
+
         target.pluginManager.withPlugin(KOTLIN_JVM_PLUGIN_ID) {
             language.set(Language.KOTLIN_JVM)
+            extension.kotlinVersion.set(kotlinVersion(target))
             addGeneratedSources(extension, target, kotlinSourceDirectories(target, "main"))
         }
 
         target.pluginManager.withPlugin(KOTLIN_MULTIPLATFORM_PLUGIN_ID) {
             language.set(Language.KOTLIN_MULTIPLATFORM)
+            extension.kotlinVersion.set(kotlinVersion(target))
             addGeneratedSources(extension, target, kotlinSourceDirectories(target, "commonMain"))
             generateOnIdeSync(target, generateTask)
 
@@ -127,6 +149,13 @@ public class BuildMetaPlugin : Plugin<Project> {
                 replacePlaceholders(this, extension.placeholders, resolutionFile)
             }
         }
+    }
+
+    private fun defaultGroup(project: Project): String {
+        if (project.path == Project.PATH_SEPARATOR) return ""
+        val rootName = project.rootProject.name
+        val parentPath = project.path.substringBeforeLast(Project.PATH_SEPARATOR)
+        return rootName + parentPath.replace(Project.PATH_SEPARATOR, ".")
     }
 
     private fun resolveValues(
@@ -170,6 +199,11 @@ public class BuildMetaPlugin : Plugin<Project> {
             ),
         )
     }
+
+    private fun kotlinVersion(project: Project): Provider<String> =
+        project.provider {
+            project.extensions.getByName("kotlin").withGroovyBuilder { getProperty("coreLibrariesVersion") } as String
+        }
 
     private fun kotlinSourceDirectories(
         project: Project,

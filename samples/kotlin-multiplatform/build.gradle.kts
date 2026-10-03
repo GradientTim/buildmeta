@@ -2,6 +2,10 @@
 
 import dev.gradienttim.buildmeta.codegen.data.DataType
 import dev.gradienttim.buildmeta.codegen.data.Literals
+import dev.gradienttim.buildmeta.helpers.registerCiMeta
+import dev.gradienttim.buildmeta.helpers.registerEnvironmentMeta
+import dev.gradienttim.buildmeta.helpers.registerGitMeta
+import dev.gradienttim.buildmeta.helpers.registerProjectMeta
 import dev.gradienttim.buildmeta.meta.FieldMeta
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.ExperimentalTime
@@ -74,15 +78,10 @@ buildMeta {
         field("supportedLevels", 1..10)
     }
 
-    register("gitMeta") {
-        fileName = "GitMeta"
-        fieldNamingStrategy = FieldMeta.NamingStrategy.SCREAMING_SNAKE_CASE
-
-        field("commitHash", git("rev-parse", "--short", "HEAD").map { it.ifEmpty { "unknown" } })
-        field("isDirty", git("status", "--porcelain").map { it.isNotEmpty() }) {
-            visibility = FieldMeta.Visibility.INTERNAL
-        }
-    }
+    registerCiMeta()
+    registerGitMeta()
+    registerProjectMeta()
+    registerEnvironmentMeta()
 }
 
 object IntRangeDataType : DataType<IntRange>() {
@@ -91,11 +90,3 @@ object IntRangeDataType : DataType<IntRange>() {
 
     override fun format(value: IntRange): String = "${value.first}..${value.last}"
 }
-
-fun git(vararg args: String): Provider<String> =
-    providers
-        .exec {
-            commandLine("git", *args)
-            isIgnoreExitValue = true
-        }.standardOutput.asText
-        .map { it.trim() }

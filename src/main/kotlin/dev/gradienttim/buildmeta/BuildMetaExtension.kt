@@ -43,6 +43,19 @@ public abstract class BuildMetaExtension @Inject constructor(
 
     public val placeholders: PlaceholdersExtension = objects.newInstance(PlaceholdersExtension::class.java)
 
+    internal val projectName: Property<String> = objects.property(String::class.java)
+    internal val projectPath: Property<String> = objects.property(String::class.java)
+    internal val projectGroup: Property<String> = objects.property(String::class.java)
+    internal val projectVersion: Property<String> = objects.property(String::class.java)
+    internal val projectDescription: Property<String> = objects.property(String::class.java)
+    internal val projectDefaultGroup: Property<String> = objects.property(String::class.java)
+    internal val rootProjectName: Property<String> = objects.property(String::class.java)
+    internal val rootProjectGroup: Property<String> = objects.property(String::class.java)
+    internal val rootProjectVersion: Property<String> = objects.property(String::class.java)
+    internal val rootProjectDescription: Property<String> = objects.property(String::class.java)
+    internal val javaVersion: Property<String> = objects.property(String::class.java)
+    internal val kotlinVersion: Property<String> = objects.property(String::class.java)
+
     init {
         fallbackFileName.convention(BuildMeta.DEFAULT_FILE_NAME)
         fallbackPackageName.convention(BuildMeta.DEFAULT_PACKAGE_NAME)
